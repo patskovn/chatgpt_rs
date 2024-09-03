@@ -187,7 +187,7 @@ impl ChatGPT {
     pub async fn send_history_streaming(
         &self,
         history: &Vec<ChatMessage>,
-    ) -> crate::Result<impl Stream<Item = ResponseChunk>> {
+    ) -> crate::Result<impl Stream<Item = crate::Result<ResponseChunk>>> {
         let response = self
             .client
             .post(self.config.api_url.clone())
@@ -257,7 +257,7 @@ impl ChatGPT {
     pub async fn send_message_streaming<S: Into<String>>(
         &self,
         message: S,
-    ) -> crate::Result<impl Stream<Item = ResponseChunk>> {
+    ) -> crate::Result<impl Stream<Item = crate::Result<ResponseChunk>>> {
         let response = self
             .client
             .post(self.config.api_url.clone())
@@ -288,38 +288,68 @@ impl ChatGPT {
     #[cfg(feature = "streams")]
     fn process_streaming_response(
         response: Response,
-    ) -> crate::Result<impl Stream<Item = ResponseChunk>> {
-        use eventsource_stream::Eventsource;
+    ) -> crate::Result<impl Stream<Item = crate::Result<ResponseChunk>>> {
+        use core::str;
+
         use futures_util::StreamExt;
 
         // also handles errors
         response
             .error_for_status()
-            .map(|response| {
-                let response_stream = response.bytes_stream().eventsource();
-                response_stream.map(move |part| {
-                    let chunk = &part.expect("Stream closed abruptly!").data;
-                    if chunk == "[DONE]" {
-                        return ResponseChunk::Done;
-                    }
-                    let data: InboundResponseChunk = serde_json::from_str(chunk)
-                        .expect("Invalid inbound streaming response payload!");
-                    let choice = data.choices[0].to_owned();
-                    match choice.delta {
-                        InboundChunkPayload::AnnounceRoles { role } => {
-                            ResponseChunk::BeginResponse {
-                                role,
-                                response_index: choice.index,
-                            }
+            .map(|response| response.bytes_stream())
+            .map(|stream| {
+                stream.flat_map(move |part| {
+                    let unwrapped_bytes = match part {
+                        Ok(received_bytes) => received_bytes,
+                        Err(err) => {
+                            return futures::stream::iter(vec![crate::Result::Err(
+                                crate::err::Error::ClientError(err),
+                            )])
                         }
-                        InboundChunkPayload::StreamContent { content } => ResponseChunk::Content {
-                            delta: content,
-                            response_index: choice.index,
-                        },
-                        InboundChunkPayload::Close {} => ResponseChunk::CloseResponse {
-                            response_index: choice.index,
-                        },
-                    }
+                    };
+                    let parsed_bytes = match str::from_utf8(&unwrapped_bytes) {
+                        Ok(parsed_bytes) => parsed_bytes
+                            .split("\n")
+                            .map(|line| line.strip_prefix("data: ").unwrap_or(line)),
+                        Err(parse_error) => {
+                            return futures::stream::iter(vec![crate::Result::Err(
+                                crate::err::Error::ParsingError(format!("{}", parse_error)),
+                            )])
+                        }
+                    };
+                    let results = parsed_bytes
+                        .filter(|chunk| !chunk.is_empty())
+                        .map(|chunk| {
+                            if chunk == "[DONE]" {
+                                return ResponseChunk::Done;
+                            }
+                            let data: InboundResponseChunk = serde_json::from_str(chunk)
+                                .unwrap_or_else(|_| {
+                                    panic!("Invalid inbound streaming response payload! {}", chunk)
+                                });
+                            let choice = data.choices[0].to_owned();
+                            match choice.delta {
+                                InboundChunkPayload::AnnounceRoles { role } => {
+                                    ResponseChunk::BeginResponse {
+                                        role,
+                                        response_index: choice.index,
+                                    }
+                                }
+                                InboundChunkPayload::StreamContent { content } => {
+                                    ResponseChunk::Content {
+                                        delta: content,
+                                        response_index: choice.index,
+                                    }
+                                }
+                                InboundChunkPayload::Close {} => ResponseChunk::CloseResponse {
+                                    response_index: choice.index,
+                                },
+                            }
+                        })
+                        .map(crate::Result::Ok)
+                        .collect::<Vec<crate::Result<ResponseChunk>>>();
+
+                    futures::stream::iter(results)
                 })
             })
             .map_err(crate::err::Error::from)

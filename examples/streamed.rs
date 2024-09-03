@@ -21,10 +21,10 @@ async fn main() -> Result<()> {
     // Iterating over stream contents
     stream
         .for_each(|each| async move {
-            if let ResponseChunk::Content {
+            if let Ok(ResponseChunk::Content {
                 delta,
                 response_index: _,
-            } = each
+            }) = each
             {
                 // Printing part of response without the newline
                 print!("{delta}");

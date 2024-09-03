@@ -23,10 +23,10 @@ async fn main() -> Result<()> {
     let mut output: Vec<ResponseChunk> = Vec::new();
     while let Some(chunk) = stream.next().await {
         match chunk {
-            ResponseChunk::Content {
+            Ok(ResponseChunk::Content {
                 delta,
                 response_index,
-            } => {
+            }) => {
                 // Printing part of response without the newline
                 print!("{delta}");
                 // Manually flushing the standard output, as `print` macro does not do that
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
                 });
             }
             // We don't really care about other types, other than parsing them into a ChatMessage later
-            other => output.push(other),
+            other => output.push(other.unwrap()),
         }
     }
 
@@ -51,17 +51,15 @@ async fn main() -> Result<()> {
         .await?;
     another_stream
         .for_each(|each| async move {
-            match each {
-                ResponseChunk::Content {
-                    delta,
-                    response_index: _,
-                } => {
-                    // Printing part of response without the newline
-                    print!("{delta}");
-                    // Manually flushing the standard output, as `print` macro does not do that
-                    stdout().lock().flush().unwrap();
-                }
-                _ => {}
+            if let Ok(ResponseChunk::Content {
+                delta,
+                response_index: _,
+            }) = each
+            {
+                // Printing part of response without the newline
+                print!("{delta}");
+                // Manually flushing the standard output, as `print` macro does not do that
+                stdout().lock().flush().unwrap();
             }
         })
         .await;

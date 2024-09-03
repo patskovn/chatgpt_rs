@@ -179,7 +179,7 @@ impl Conversation {
         &mut self,
         role: Role,
         message: S,
-    ) -> crate::Result<impl Stream<Item = ResponseChunk>> {
+    ) -> crate::Result<impl Stream<Item = crate::Result<ResponseChunk>>> {
         self.history.push(ChatMessage {
             role,
             content: message.into(),
@@ -202,7 +202,7 @@ impl Conversation {
     pub async fn send_message_streaming<S: Into<String>>(
         &mut self,
         message: S,
-    ) -> crate::Result<impl Stream<Item = ResponseChunk>> {
+    ) -> crate::Result<impl Stream<Item = crate::Result<ResponseChunk>>> {
         self.send_role_message_streaming(Role::User, message).await
     }
 

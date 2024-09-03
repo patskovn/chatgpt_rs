@@ -114,7 +114,10 @@ pub mod test {
         let response = client
             .send_message_streaming("Could you give me names of three popular Rust web frameworks?")
             .await?;
-        let collected = response.collect::<Vec<ResponseChunk>>().await;
+        let collected = response
+            .map(|part| part.unwrap())
+            .collect::<Vec<ResponseChunk>>()
+            .await;
         assert_eq!(collected.last().unwrap().to_owned(), ResponseChunk::Done);
         Ok(())
     }
@@ -129,7 +132,10 @@ pub mod test {
         let streamed = conv
             .send_message_streaming("Now could you do the same but for Kotlin?")
             .await?;
-        let collected = streamed.collect::<Vec<ResponseChunk>>().await;
+        let collected = streamed
+            .map(|part| part.unwrap())
+            .collect::<Vec<ResponseChunk>>()
+            .await;
         assert_eq!(collected.last().unwrap().to_owned(), ResponseChunk::Done);
         Ok(())
     }
@@ -158,6 +164,7 @@ pub mod test {
         let client = ChatGPT::new_with_config(
             std::env::var("TEST_API_KEY")?,
             ModelConfiguration {
+                max_tokens: Some(1),
                 ..Default::default()
             },
         )?;
