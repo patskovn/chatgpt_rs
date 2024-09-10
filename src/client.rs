@@ -298,36 +298,45 @@ impl ChatGPT {
             .error_for_status()
             .map(|response| response.bytes_stream())
             .map(|stream| {
-                stream.flat_map(move |part| {
+                let mut unparsed = "".to_string();
+                stream.map(move |part| {
                     let unwrapped_bytes = match part {
                         Ok(received_bytes) => received_bytes,
                         Err(err) => {
-                            return futures::stream::iter(vec![crate::Result::Err(
+                            return vec![crate::Result::Err(
                                 crate::err::Error::ClientError(err),
-                            )])
+                            )]
                         }
                     };
                     let parsed_bytes = match str::from_utf8(&unwrapped_bytes) {
-                        Ok(parsed_bytes) => parsed_bytes
-                            .split("\n")
-                            .map(|line| line.strip_prefix("data: ").unwrap_or(line)),
+                        Ok(parsed_bytes) => parsed_bytes,
                         Err(parse_error) => {
-                            return futures::stream::iter(vec![crate::Result::Err(
+                            return vec![crate::Result::Err(
                                 crate::err::Error::ParsingError(format!("{}", parse_error)),
-                            )])
+                            )]
                         }
                     };
-                    let results = parsed_bytes
-                        .filter(|chunk| !chunk.is_empty())
-                        .map(|chunk| {
-                            if chunk == "[DONE]" {
-                                return ResponseChunk::Done;
-                            }
-                            let data: InboundResponseChunk = serde_json::from_str(chunk)
+                    let mut unparsed_for_iteration = unparsed.clone();
+                    let mut content_to_iterate = parsed_bytes;
+                    if !unparsed.is_empty() {
+                        unparsed_for_iteration += content_to_iterate;
+                        content_to_iterate = &unparsed_for_iteration;
+                        unparsed = "".to_string();
+                    }
+                    let mut response_chunks: Vec<ResponseChunk> = vec![];
+                    for chunk in content_to_iterate.split_inclusive("\n\n").filter_map(|line| line.strip_prefix("data: ")) {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        let parsed_chunk = if let Some(data) = chunk.strip_suffix("\n\n") {
+                            if data == "[DONE]" {
+                                ResponseChunk::Done
+                            } else {
+                            let parsed_data: InboundResponseChunk = serde_json::from_str(chunk)
                                 .unwrap_or_else(|_| {
-                                    panic!("Invalid inbound streaming response payload! {}", chunk)
+                                    panic!("Invalid inbound streaming response payload: {}. Total err: {:#?}", chunk, unwrapped_bytes)
                                 });
-                            let choice = data.choices[0].to_owned();
+                            let choice = parsed_data.choices[0].to_owned();
                             match choice.delta {
                                 InboundChunkPayload::AnnounceRoles { role } => {
                                     ResponseChunk::BeginResponse {
@@ -345,10 +354,20 @@ impl ChatGPT {
                                     response_index: choice.index,
                                 },
                             }
-                        })
-                        .map(crate::Result::Ok)
-                        .collect::<Vec<crate::Result<ResponseChunk>>>();
+                            }
+                        } else {
+                            unparsed = chunk.to_owned();
+                            break;
+                        };
+                        response_chunks.push(parsed_chunk);
+                    }
 
+                    response_chunks
+                        .into_iter()
+                        .map(crate::Result::Ok)
+                        .collect::<Vec<crate::Result<ResponseChunk>>>()
+                })
+                .flat_map(|results| {
                     futures::stream::iter(results)
                 })
             })
